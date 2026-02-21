@@ -26,8 +26,7 @@ struct Line {
 /// Format a token stream into a formatted string.
 pub fn format(tokens: &[Token]) -> String {
     let lines = split_into_lines(tokens);
-    let indent_unit = detect_indent_unit(&lines);
-    let formatted_lines = normalize_lines(lines, indent_unit);
+    let formatted_lines = normalize_lines(lines);
     render(formatted_lines)
 }
 
@@ -94,33 +93,54 @@ fn count_spaces(s: &str) -> usize {
         .sum()
 }
 
-/// Detect the indentation unit used in the file.
-/// Uses the smallest non-zero indent found on non-operator lines.
-fn detect_indent_unit(lines: &[Line]) -> usize {
-    lines
-        .iter()
-        .filter(|l| {
-            !l.tokens.is_empty()
-                && l.original_indent > 0
-                && !l.tokens.first().is_some_and(|t| t.kind == TokenKind::SymbolyId)
-        })
-        .map(|l| l.original_indent)
-        .min()
-        .unwrap_or(INDENT_WIDTH)
+/// Compute normalized indent levels from original indentation.
+///
+/// Tracks a stack of seen indentation depths. Each new deeper indentation
+/// increases the level by 1, regardless of how many spaces it jumped.
+/// Returning to a shallower indentation pops back to that level.
+fn compute_indent_levels(lines: &[Line]) -> Vec<usize> {
+    let mut levels = Vec::with_capacity(lines.len());
+    // Stack of (original_indent, level) pairs
+    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
+
+    for line in lines {
+        // Skip blank lines — they get level 0 (doesn't matter, no tokens)
+        if line.tokens.is_empty() {
+            levels.push(0);
+            continue;
+        }
+
+        let orig = line.original_indent;
+
+        // Pop stack entries that are deeper than current indent
+        while stack.len() > 1 && stack.last().unwrap().0 > orig {
+            stack.pop();
+        }
+
+        let &(top_indent, top_level) = stack.last().unwrap();
+
+        if orig == top_indent {
+            levels.push(top_level);
+        } else if orig > top_indent {
+            let new_level = top_level + 1;
+            stack.push((orig, new_level));
+            levels.push(new_level);
+        } else {
+            // orig < top_indent but not found in stack — use closest
+            levels.push(top_level);
+        }
+    }
+
+    levels
 }
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
 /// then align consecutive `|>` lines.
-fn normalize_lines(lines: Vec<Line>, indent_unit: usize) -> Vec<Line> {
+fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
     let mut result = Vec::new();
+    let indent_levels = compute_indent_levels(&lines);
 
-    for line in lines {
-        // Normalize indentation: convert from original indent unit to INDENT_WIDTH
-        let indent_level = if indent_unit > 0 && line.original_indent > 0 {
-            line.original_indent / indent_unit
-        } else {
-            0
-        };
+    for (line, &indent_level) in lines.into_iter().zip(indent_levels.iter()) {
         let new_indent = indent_level * INDENT_WIDTH;
 
         // Collapse multiple whitespace tokens within the line to single spaces

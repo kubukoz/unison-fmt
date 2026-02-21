@@ -4,7 +4,7 @@ A formatter for [Unison](https://www.unison-lang.org/) source files, built on a 
 
 ## What it does
 
-- **Normalizes indentation** to 2 spaces
+- **Normalizes indentation** to 4 spaces
 - **Collapses multiple spaces** to single spaces
 - **Strips trailing whitespace**
 - **Breaks long lines** at `|>` pipeline operators
