@@ -433,18 +433,18 @@ mod tests {
 
     #[test]
     fn test_preserve_indentation_structure() {
-        let input = "foo =\n  bar = 1\n  baz = 2\n";
-        let tokens = lexer::lex(input);
-        let result = format(&tokens);
-        assert_eq!(result, "foo =\n  bar = 1\n  baz = 2\n");
-    }
-
-    #[test]
-    fn test_normalize_4space_to_2space() {
         let input = "foo =\n    bar = 1\n    baz = 2\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
-        assert_eq!(result, "foo =\n  bar = 1\n  baz = 2\n");
+        assert_eq!(result, "foo =\n    bar = 1\n    baz = 2\n");
+    }
+
+    #[test]
+    fn test_normalize_2space_to_4space() {
+        let input = "foo =\n  bar = 1\n  baz = 2\n";
+        let tokens = lexer::lex(input);
+        let result = format(&tokens);
+        assert_eq!(result, "foo =\n    bar = 1\n    baz = 2\n");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         let input = "foo =\n    bar =\n        baz = 1\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
-        assert_eq!(result, "foo =\n  bar =\n    baz = 1\n");
+        assert_eq!(result, "foo =\n    bar =\n        baz = 1\n");
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
         for (i, line) in result.lines().enumerate() {
             if i > 0 {
                 assert!(
-                    line.starts_with("  "),
+                    line.starts_with("    "),
                     "Continuation line should be indented: {line:?}"
                 );
             }

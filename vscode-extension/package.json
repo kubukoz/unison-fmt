@@ -19,7 +19,18 @@
     "onLanguage:unison"
   ],
   "main": "./extension.js",
-  "contributes": {},
+  "contributes": {
+    "configuration": {
+      "title": "Unison Formatter",
+      "properties": {
+        "unison-format.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the unison-fmt CLI binary. If set, the extension uses the CLI instead of the built-in WebAssembly formatter."
+        }
+      }
+    }
+  },
   "extensionDependencies": [
     "unison-lang.unison"
   ],
