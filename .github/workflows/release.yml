@@ -85,3 +85,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload ${{ github.event.release.tag_name }} vscode-extension/unison-fmt.vsix
+
+      - name: Publish to VS Code Marketplace
+        working-directory: vscode-extension
+        run: vsce publish
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
