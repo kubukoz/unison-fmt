@@ -9,6 +9,38 @@ A formatter for [Unison](https://www.unison-lang.org/) source files, built on a 
 - **Strips trailing whitespace**
 - **Breaks long lines** at `|>` pipeline operators
 
+### Example
+
+Before:
+
+<!-- `$ cat examples/before.u` as unison -->
+
+```unison
+handler = Handler cases
+        req| Routes.get (root Path./ "hello") req ->
+                parseName =
+                                        do
+                                                        req
+                                                            |> HttpRequest.uri |> URI.query
+                                                            |> fromRawQuery
+        catchWith (e -> ok (Body (toUtf8 ("error: " ++ e)))) happyPath
+```
+
+After:
+
+<!-- `$ cat examples/before.u | cargo run` as unison -->
+
+```unison
+handler = Handler cases
+    req| Routes.get (root Path./ "hello") req ->
+        parseName =
+            do
+                req
+                    |> HttpRequest.uri |> URI.query
+                    |> fromRawQuery
+    catchWith (e -> ok (Body (toUtf8 ("error: " ++ e)))) happyPath
+```
+
 ## VS Code extension
 
 Install **Unison Formatter** (`kubukoz.unison-format`) from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kubukoz.unison-format).
@@ -44,13 +76,13 @@ The extension runs the formatter as WebAssembly — no external binary needed.
 
 Grab a prebuilt binary from the [latest release](https://github.com/kubukoz/unison-fmt/releases/latest):
 
-| Platform | Binary |
-|---|---|
-| Linux x86_64 | `unison-fmt-x86_64-linux` |
-| Linux aarch64 | `unison-fmt-aarch64-linux` |
-| macOS x86_64 | `unison-fmt-x86_64-macos` |
-| macOS aarch64 (Apple Silicon) | `unison-fmt-aarch64-macos` |
-| Windows x86_64 | `unison-fmt-x86_64-windows.exe` |
+| Platform                      | Binary                          |
+| ----------------------------- | ------------------------------- |
+| Linux x86_64                  | `unison-fmt-x86_64-linux`       |
+| Linux aarch64                 | `unison-fmt-aarch64-linux`      |
+| macOS x86_64                  | `unison-fmt-x86_64-macos`       |
+| macOS aarch64 (Apple Silicon) | `unison-fmt-aarch64-macos`      |
+| Windows x86_64                | `unison-fmt-x86_64-windows.exe` |
 
 ```sh
 # Example: download and install on macOS Apple Silicon
