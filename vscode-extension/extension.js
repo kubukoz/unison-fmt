@@ -15,11 +15,11 @@ function activate(context) {
 
         const fullRange = new vscode.Range(
           document.positionAt(0),
-          document.positionAt(input.length)
+          document.positionAt(input.length),
         );
         return [vscode.TextEdit.replace(fullRange, formatted)];
       },
-    }
+    },
   );
 
   context.subscriptions.push(formatter);

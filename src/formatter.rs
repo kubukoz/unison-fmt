@@ -138,7 +138,8 @@ fn gcd(a: usize, b: usize) -> usize {
     }
 }
 
-/// Normalize lines: fix indentation, collapse internal whitespace, break long lines.
+/// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
+/// then align consecutive `|>` lines.
 fn normalize_lines(lines: Vec<Line>, indent_unit: usize) -> Vec<Line> {
     let mut result = Vec::new();
 
@@ -197,7 +198,37 @@ fn normalize_lines(lines: Vec<Line>, indent_unit: usize) -> Vec<Line> {
         }
     }
 
-    result
+    align_pipes(result)
+}
+
+/// Align consecutive lines that start with `|>` to the same indentation level.
+///
+/// When we see a group of lines starting with `|>`, we set them all to the
+/// indent of the first `|>` line in that group.
+fn align_pipes(mut lines: Vec<Line>) -> Vec<Line> {
+    let mut i = 0;
+    while i < lines.len() {
+        if line_starts_with_pipe(&lines[i]) {
+            let target_indent = lines[i].original_indent;
+            // Walk forward through consecutive |> lines
+            let mut j = i + 1;
+            while j < lines.len() && line_starts_with_pipe(&lines[j]) {
+                lines[j].original_indent = target_indent;
+                j += 1;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    lines
+}
+
+/// Check if a line's first significant token is `|>`.
+fn line_starts_with_pipe(line: &Line) -> bool {
+    line.tokens
+        .first()
+        .is_some_and(|t| t.kind == TokenKind::SymbolyId && t.text == "|>")
 }
 
 /// Collapse multiple adjacent whitespace tokens into single spaces,

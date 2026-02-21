@@ -1,23 +1,40 @@
 # unison-fmt
 
-A vibe coded formatter for Unison files. No guarantees!
-
-<!-- omit in toc -->
-## Table of contents
-
-- [unison-fmt](#unison-fmt)
-  - [VS Code extension](#vs-code-extension)
-  - [CLI](#cli)
-    - [Download](#download)
-    - [Build from source](#build-from-source)
-    - [Usage](#usage)
-
-
 A formatter for [Unison](https://www.unison-lang.org/) source files, built on a lossless parser that preserves all syntax information (whitespace, comments, indentation).
+
+## What it does
+
+- **Normalizes indentation** to 2 spaces
+- **Collapses multiple spaces** to single spaces
+- **Strips trailing whitespace**
+- **Breaks long lines** at `|>` pipeline operators
 
 ## VS Code extension
 
-Install **Unison Formatter** (`kubukoz.unison-format`) from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kubukoz.unison-format), then format `.u` files with the standard **Format Document** command (`Shift+Alt+F` / `Shift+Option+F`).
+Install **Unison Formatter** (`kubukoz.unison-format`) from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kubukoz.unison-format).
+
+Since the official Unison extension also provides formatting, you need to set this extension as the default formatter. Add to your `settings.json`:
+
+```json
+{
+  "[unison]": {
+    "editor.defaultFormatter": "kubukoz.unison-format"
+  }
+}
+```
+
+Then format `.u` files with the standard **Format Document** command (`Shift+Alt+F` / `Shift+Option+F`).
+
+To also format on save, add `editor.formatOnSave`:
+
+```json
+{
+  "[unison]": {
+    "editor.defaultFormatter": "kubukoz.unison-format",
+    "editor.formatOnSave": true
+  }
+}
+```
 
 The extension runs the formatter as WebAssembly — no external binary needed.
 
@@ -27,13 +44,13 @@ The extension runs the formatter as WebAssembly — no external binary needed.
 
 Grab a prebuilt binary from the [latest release](https://github.com/kubukoz/unison-fmt/releases/latest):
 
-| Platform                      | Binary                          |
-| ----------------------------- | ------------------------------- |
-| Linux x86_64                  | `unison-fmt-x86_64-linux`       |
-| Linux aarch64                 | `unison-fmt-aarch64-linux`      |
-| macOS x86_64                  | `unison-fmt-x86_64-macos`       |
-| macOS aarch64 (Apple Silicon) | `unison-fmt-aarch64-macos`      |
-| Windows x86_64                | `unison-fmt-x86_64-windows.exe` |
+| Platform | Binary |
+|---|---|
+| Linux x86_64 | `unison-fmt-x86_64-linux` |
+| Linux aarch64 | `unison-fmt-aarch64-linux` |
+| macOS x86_64 | `unison-fmt-x86_64-macos` |
+| macOS aarch64 (Apple Silicon) | `unison-fmt-aarch64-macos` |
+| Windows x86_64 | `unison-fmt-x86_64-windows.exe` |
 
 ```sh
 # Example: download and install on macOS Apple Silicon

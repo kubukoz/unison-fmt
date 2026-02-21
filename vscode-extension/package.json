@@ -15,18 +15,11 @@
     "onLanguage:unison"
   ],
   "main": "./extension.js",
-  "contributes": {
-    "languages": [
-      {
-        "id": "unison",
-        "extensions": [
-          ".u"
-        ],
-        "aliases": [
-          "Unison"
-        ]
-      }
-    ]
-  },
-  "dependencies": {}
+  "contributes": {},
+  "extensionDependencies": [
+    "unison-lang.unison"
+  ],
+  "dependencies": {
+    "@vscode/vsce": "^3.7.1"
+  }
 }
