@@ -79,7 +79,7 @@ jobs:
 
       - name: Package extension
         working-directory: vscode-extension
-        run: vsce package -o unison-fmt.vsix
+        run: vsce package ${GITHUB_REF_NAME#v} -o unison-fmt.vsix
 
       - name: Upload VSIX to release
         env:
@@ -88,6 +88,6 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         working-directory: vscode-extension
-        run: vsce publish
+        run: vsce publish ${GITHUB_REF_NAME#v}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
