@@ -9,7 +9,7 @@
 use crate::lexer::{Token, TokenKind};
 
 const MAX_LINE_WIDTH: usize = 100;
-const INDENT_WIDTH: usize = 2;
+const INDENT_WIDTH: usize = 4;
 
 /// A line is a sequence of tokens between newlines.
 struct Line {
@@ -94,48 +94,19 @@ fn count_spaces(s: &str) -> usize {
         .sum()
 }
 
-/// Detect the indentation unit used in the file (e.g., 2, 4, 8 spaces).
+/// Detect the indentation unit used in the file.
+/// Uses the smallest non-zero indent found on non-operator lines.
 fn detect_indent_unit(lines: &[Line]) -> usize {
-    let mut indents: Vec<usize> = lines
+    lines
         .iter()
-        .filter(|l| !l.tokens.is_empty() && l.original_indent > 0)
+        .filter(|l| {
+            !l.tokens.is_empty()
+                && l.original_indent > 0
+                && !l.tokens.first().is_some_and(|t| t.kind == TokenKind::SymbolyId)
+        })
         .map(|l| l.original_indent)
-        .collect();
-    indents.sort();
-    indents.dedup();
-
-    if indents.is_empty() {
-        return INDENT_WIDTH;
-    }
-
-    // Find the GCD of all indent differences
-    // First, compute differences between consecutive indent levels and the base indent
-    let mut diffs: Vec<usize> = Vec::new();
-    for &indent in &indents {
-        diffs.push(indent);
-    }
-    for w in indents.windows(2) {
-        let diff = w[1] - w[0];
-        if diff > 0 {
-            diffs.push(diff);
-        }
-    }
-
-    let g = diffs.into_iter().reduce(gcd).unwrap_or(INDENT_WIDTH);
-
-    if g == 0 {
-        INDENT_WIDTH
-    } else {
-        g
-    }
-}
-
-fn gcd(a: usize, b: usize) -> usize {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
+        .min()
+        .unwrap_or(INDENT_WIDTH)
 }
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
@@ -203,13 +174,20 @@ fn normalize_lines(lines: Vec<Line>, indent_unit: usize) -> Vec<Line> {
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
 ///
-/// When we see a group of consecutive lines each starting with the same symboly operator,
-/// we set them all to the indent of the first such line in that group.
+/// The target indent is the preceding non-operator line's indent + one level.
 fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
         if let Some(op) = line_leading_operator(&lines[i]) {
-            let target_indent = lines[i].original_indent;
+            // Find the preceding non-empty, non-operator line to base indent on
+            let base_indent = (0..i)
+                .rev()
+                .find(|&k| !lines[k].tokens.is_empty() && line_leading_operator(&lines[k]).is_none())
+                .map(|k| lines[k].original_indent)
+                .unwrap_or(0);
+            let target_indent = base_indent + INDENT_WIDTH;
+
+            lines[i].original_indent = target_indent;
             let mut j = i + 1;
             while j < lines.len() && line_leading_operator(&lines[j]).as_deref() == Some(&*op) {
                 lines[j].original_indent = target_indent;
