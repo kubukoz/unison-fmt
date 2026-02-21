@@ -198,21 +198,20 @@ fn normalize_lines(lines: Vec<Line>, indent_unit: usize) -> Vec<Line> {
         }
     }
 
-    align_pipes(result)
+    align_operators(result)
 }
 
-/// Align consecutive lines that start with `|>` to the same indentation level.
+/// Align consecutive lines that start with the same operator to the same indentation level.
 ///
-/// When we see a group of lines starting with `|>`, we set them all to the
-/// indent of the first `|>` line in that group.
-fn align_pipes(mut lines: Vec<Line>) -> Vec<Line> {
+/// When we see a group of consecutive lines each starting with the same symboly operator,
+/// we set them all to the indent of the first such line in that group.
+fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
-        if line_starts_with_pipe(&lines[i]) {
+        if let Some(op) = line_leading_operator(&lines[i]) {
             let target_indent = lines[i].original_indent;
-            // Walk forward through consecutive |> lines
             let mut j = i + 1;
-            while j < lines.len() && line_starts_with_pipe(&lines[j]) {
+            while j < lines.len() && line_leading_operator(&lines[j]).as_deref() == Some(&*op) {
                 lines[j].original_indent = target_indent;
                 j += 1;
             }
@@ -224,11 +223,15 @@ fn align_pipes(mut lines: Vec<Line>) -> Vec<Line> {
     lines
 }
 
-/// Check if a line's first significant token is `|>`.
-fn line_starts_with_pipe(line: &Line) -> bool {
-    line.tokens
-        .first()
-        .is_some_and(|t| t.kind == TokenKind::SymbolyId && t.text == "|>")
+/// If the line starts with a symboly operator, return it.
+fn line_leading_operator(line: &Line) -> Option<String> {
+    line.tokens.first().and_then(|t| {
+        if t.kind == TokenKind::SymbolyId {
+            Some(t.text.clone())
+        } else {
+            None
+        }
+    })
 }
 
 /// Collapse multiple adjacent whitespace tokens into single spaces,
