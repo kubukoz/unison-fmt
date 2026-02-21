@@ -1,0 +1,32 @@
+{
+  "name": "unison-format",
+  "displayName": "Unison Formatter",
+  "description": "Format Unison source files using a lossless parser",
+  "version": "0.1.0",
+  "publisher": "kubukoz",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:unison"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "unison",
+        "extensions": [
+          ".u"
+        ],
+        "aliases": [
+          "Unison"
+        ]
+      }
+    ]
+  },
+  "dependencies": {}
+}

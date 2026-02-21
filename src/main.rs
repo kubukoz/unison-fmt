@@ -1,6 +1,6 @@
-mod formatter;
-mod lexer;
-mod syntax;
+use unison_fmt::formatter;
+use unison_fmt::lexer;
+use unison_fmt::syntax;
 
 use std::io::Read;
 
