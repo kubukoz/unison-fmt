@@ -358,8 +358,8 @@ fn align_operators(mut lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> 
 
             let target_indent = if let Some(idx) = base_line_idx {
                 let base_line = &lines[idx];
-                if op == "|>" {
-                    // For pipe operators, indent relative to content after `=`
+                if op == "|>" || op == "++" {
+                    // For pipe and concat operators, indent relative to content after `=`
                     compute_pipe_continuation_indent(
                         &base_line.tokens,
                         base_line.original_indent,
@@ -628,19 +628,24 @@ fn parse_args_inside_parens(tokens: &[Token]) -> Vec<Vec<Token>> {
     args
 }
 
-/// Find positions where we can break the line (before |> operators).
+/// Find positions where we can break the line (before |> or ++ operators).
 /// First tries top-level only; if none found, allows breaking inside parens.
 fn find_break_positions(tokens: &[Token]) -> Vec<usize> {
-    // First pass: only top-level |>
-    let positions = find_pipe_positions(tokens, false);
+    // First pass: only top-level operators
+    let positions = find_operator_positions(tokens, false);
     if !positions.is_empty() {
         return positions;
     }
-    // Second pass: allow |> at any nesting depth
-    find_pipe_positions(tokens, true)
+    // Second pass: allow operators at any nesting depth
+    find_operator_positions(tokens, true)
 }
 
-fn find_pipe_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
+/// Check if a token is a breakable operator (|> or ++).
+fn is_breakable_operator(tok: &Token) -> bool {
+    tok.kind == TokenKind::SymbolyId && (tok.text == "|>" || tok.text == "++")
+}
+
+fn find_operator_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut paren_depth = 0u32;
 
@@ -657,8 +662,8 @@ fn find_pipe_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
             continue;
         }
 
-        // Break before |>
-        if tok.kind == TokenKind::SymbolyId && tok.text == "|>" && i > 0 {
+        // Break before |> or ++
+        if is_breakable_operator(tok) && i > 0 {
             positions.push(i);
         }
     }
@@ -828,6 +833,27 @@ mod tests {
     #[test]
     fn test_break_long_pipe_line() {
         let input = "x = foo |> bar |> baz |> quux |> something |> another |> more |> evenMore |> reallyLongFunction |> anotherOne\n";
+        let tokens = lexer::lex(input);
+        let result = format(&tokens);
+        // Should be broken across multiple lines
+        assert!(
+            result.lines().count() > 1,
+            "Long line should be broken:\n{result}"
+        );
+        // Each continuation should be indented
+        for (i, line) in result.lines().enumerate() {
+            if i > 0 {
+                assert!(
+                    line.starts_with("    "),
+                    "Continuation line should be indented: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_break_long_concat_line() {
+        let input = "message = \"Hello, \" ++ userName ++ \"! Welcome to \" ++ appName ++ \". Your session ID is: \" ++ sessionId\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
         // Should be broken across multiple lines
