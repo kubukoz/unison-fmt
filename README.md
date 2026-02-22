@@ -34,10 +34,7 @@ After:
 handler = Handler cases
     req| Routes.get (root Path./ "hello") req ->
         parseName =
-            do
-                req
-                    |> HttpRequest.uri |> URI.query
-                    |> fromRawQuery
+        do req |> HttpRequest.uri |> URI.query |> fromRawQuery
     catchWith (e -> ok (Body (toUtf8 ("error: " ++ e)))) happyPath
 ```
 
