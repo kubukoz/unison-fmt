@@ -1,15 +1,51 @@
-use unison_fmt::formatter;
+use clap::{Parser, ValueEnum};
+use std::io::Read;
+use unison_fmt::formatter::{self, FormatterConfig};
 use unison_fmt::lexer;
 use unison_fmt::syntax;
 
-use std::io::Read;
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum Mode {
+    /// Format the input
+    #[default]
+    Fmt,
+    /// Tokenize and print tokens
+    Lex,
+    /// Parse and print CST
+    Parse,
+    /// Check roundtrip parsing
+    Check,
+}
+
+#[derive(Parser)]
+#[command(name = "unison-fmt")]
+#[command(about = "Format Unison source files")]
+struct Args {
+    /// Mode of operation
+    #[arg(value_enum, default_value_t = Mode::Fmt)]
+    mode: Mode,
+
+    /// Input file (reads from stdin if not provided)
+    file: Option<String>,
+
+    /// Number of spaces per indentation level
+    #[arg(long, default_value_t = 4)]
+    indent_width: usize,
+
+    /// Maximum line width before breaking
+    #[arg(long, default_value_t = 100)]
+    max_width: usize,
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("fmt");
+    let config = FormatterConfig {
+        indent_width: args.indent_width,
+        max_line_width: args.max_width,
+    };
 
-    let input = if let Some(path) = args.get(2) {
+    let input = if let Some(path) = &args.file {
         std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("Error reading {path}: {e}");
             std::process::exit(1);
@@ -20,21 +56,21 @@ fn main() {
         buf
     };
 
-    match mode {
-        "lex" => {
+    match args.mode {
+        Mode::Lex => {
             let tokens = lexer::lex(&input);
             for tok in &tokens {
                 eprintln!("{:?}", tok);
             }
         }
-        "parse" => {
+        Mode::Parse => {
             let tokens = lexer::lex(&input);
             let cst = syntax::parse(tokens);
             eprintln!("{:#?}", cst);
             let printed = syntax::print_lossless(&cst);
             print!("{}", printed);
         }
-        "check" => {
+        Mode::Check => {
             let tokens = lexer::lex(&input);
             let cst = syntax::parse(tokens);
             let printed = syntax::print_lossless(&cst);
@@ -42,7 +78,6 @@ fn main() {
                 eprintln!("✓ Roundtrip OK");
             } else {
                 eprintln!("✗ Roundtrip FAILED");
-                // Find first difference
                 let input_bytes = input.as_bytes();
                 let printed_bytes = printed.as_bytes();
                 for (i, (a, b)) in input_bytes.iter().zip(printed_bytes.iter()).enumerate() {
@@ -69,15 +104,10 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        "fmt" => {
+        Mode::Fmt => {
             let tokens = lexer::lex(&input);
-            let formatted = formatter::format(&tokens);
+            let formatted = formatter::format_with_config(&tokens, &config);
             print!("{}", formatted);
-        }
-        other => {
-            eprintln!("Unknown mode: {other}");
-            eprintln!("Usage: unison-fmt [lex|parse|check|fmt] [file]");
-            std::process::exit(1);
         }
     }
 }

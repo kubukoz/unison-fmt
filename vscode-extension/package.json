@@ -27,6 +27,20 @@
           "type": "string",
           "default": "",
           "description": "Path to the unison-fmt CLI binary. If set, the extension uses the CLI instead of the built-in WebAssembly formatter."
+        },
+        "unison-format.indentWidth": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Number of spaces per indentation level."
+        },
+        "unison-format.maxLineWidth": {
+          "type": "number",
+          "default": 100,
+          "minimum": 40,
+          "maximum": 200,
+          "description": "Maximum line width before breaking long lines."
         }
       }
     }

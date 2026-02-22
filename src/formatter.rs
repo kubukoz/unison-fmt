@@ -8,8 +8,23 @@
 
 use crate::lexer::{Token, TokenKind};
 
-const MAX_LINE_WIDTH: usize = 100;
-const INDENT_WIDTH: usize = 4;
+/// Configuration for the formatter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatterConfig {
+    /// Maximum line width before breaking long lines.
+    pub max_line_width: usize,
+    /// Number of spaces per indentation level.
+    pub indent_width: usize,
+}
+
+impl Default for FormatterConfig {
+    fn default() -> Self {
+        Self {
+            max_line_width: 100,
+            indent_width: 4,
+        }
+    }
+}
 
 /// A line is a sequence of tokens between newlines.
 struct Line {
@@ -25,8 +40,13 @@ struct Line {
 
 /// Format a token stream into a formatted string.
 pub fn format(tokens: &[Token]) -> String {
+    format_with_config(tokens, &FormatterConfig::default())
+}
+
+/// Format a token stream into a formatted string with custom configuration.
+pub fn format_with_config(tokens: &[Token], config: &FormatterConfig) -> String {
     let lines = split_into_lines(tokens);
-    let formatted_lines = normalize_lines(lines);
+    let formatted_lines = normalize_lines(lines, config);
     render(formatted_lines)
 }
 
@@ -136,12 +156,12 @@ fn compute_indent_levels(lines: &[Line]) -> Vec<usize> {
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
 /// then align consecutive `|>` lines.
-fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
+fn normalize_lines(lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> {
     let mut result = Vec::new();
     let indent_levels = compute_indent_levels(&lines);
 
     for (line, &indent_level) in lines.into_iter().zip(indent_levels.iter()) {
-        let new_indent = indent_level * INDENT_WIDTH;
+        let new_indent = indent_level * config.indent_width;
 
         // Collapse multiple whitespace tokens within the line to single spaces
         let tokens = collapse_whitespace(&line.tokens);
@@ -149,18 +169,26 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
         // Check if the line is too long and needs breaking
         let line_len = new_indent + tokens_display_width(&tokens);
 
-        if line_len > MAX_LINE_WIDTH {
+        if line_len > config.max_line_width {
             // Try to break the line, then recursively break any sub-lines still too long
-            let broken = break_long_line(&tokens, new_indent);
+            let broken = break_long_line(&tokens, new_indent, config);
             let mut sub_lines: Vec<(usize, Vec<Token>)> = Vec::new();
             for (i, sub_tokens) in broken.iter().enumerate() {
-                let indent = if i == 0 { new_indent } else { new_indent + INDENT_WIDTH };
+                let indent = if i == 0 {
+                    new_indent
+                } else {
+                    new_indent + config.indent_width
+                };
                 let sub_len = indent + tokens_display_width(sub_tokens);
-                if sub_len > MAX_LINE_WIDTH && broken.len() > 1 {
+                if sub_len > config.max_line_width && broken.len() > 1 {
                     // Recursively break this sub-line
-                    let sub_broken = break_long_line(sub_tokens, indent);
+                    let sub_broken = break_long_line(sub_tokens, indent, config);
                     for (j, sub_sub) in sub_broken.iter().enumerate() {
-                        let sub_indent = if j == 0 { indent } else { indent + INDENT_WIDTH };
+                        let sub_indent = if j == 0 {
+                            indent
+                        } else {
+                            indent + config.indent_width
+                        };
                         sub_lines.push((sub_indent, sub_sub.clone()));
                     }
                 } else {
@@ -189,13 +217,13 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
         }
     }
 
-    align_operators(result)
+    align_operators(result, config)
 }
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
 ///
 /// The target indent is the preceding non-operator line's indent + one level.
-fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
+fn align_operators(mut lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
         if let Some(op) = line_leading_operator(&lines[i]) {
@@ -205,7 +233,7 @@ fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
                 .find(|&k| !lines[k].tokens.is_empty() && line_leading_operator(&lines[k]).is_none())
                 .map(|k| lines[k].original_indent)
                 .unwrap_or(0);
-            let target_indent = base_indent + INDENT_WIDTH;
+            let target_indent = base_indent + config.indent_width;
 
             lines[i].original_indent = target_indent;
             let mut j = i + 1;
@@ -267,12 +295,16 @@ fn tokens_display_width(tokens: &[Token]) -> usize {
 
 /// Break a long line at sensible points.
 /// Returns a list of sub-lines (each a Vec<Token>).
-fn break_long_line(tokens: &[Token], base_indent: usize) -> Vec<Vec<Token>> {
+fn break_long_line(
+    tokens: &[Token],
+    base_indent: usize,
+    config: &FormatterConfig,
+) -> Vec<Vec<Token>> {
     // Strategy: try to break at |> operators first, then at other infix operators
     let pipe_positions = find_break_positions(tokens);
 
     if !pipe_positions.is_empty() {
-        return break_at_positions(tokens, &pipe_positions, base_indent);
+        return break_at_positions(tokens, &pipe_positions, base_indent, config);
     }
 
     // If no good break points, return as-is
@@ -323,10 +355,11 @@ fn break_at_positions(
     tokens: &[Token],
     positions: &[usize],
     base_indent: usize,
+    config: &FormatterConfig,
 ) -> Vec<Vec<Token>> {
     let mut result = Vec::new();
     let mut start = 0;
-    let continuation_indent = base_indent + INDENT_WIDTH;
+    let continuation_indent = base_indent + config.indent_width;
 
     for &pos in positions {
         // Take tokens from start to pos (exclusive)
@@ -346,7 +379,7 @@ fn break_at_positions(
             let width = indent + tokens_display_width(&chunk);
 
             // If first chunk is short enough, emit it
-            if result.is_empty() || width <= MAX_LINE_WIDTH {
+            if result.is_empty() || width <= config.max_line_width {
                 result.push(chunk);
             } else {
                 // Merge with previous chunk if possible
