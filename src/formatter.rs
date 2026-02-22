@@ -921,4 +921,20 @@ mod tests {
             "writeStatus (ReplayStatus true true (Some since) processed' failed' (Some startedAt) (Some updatedAt) None)\n"
         );
     }
+
+    #[test]
+    fn test_pipe_continuation_indent_after_equals() {
+        // Pipe continuations should be indented indent_width after the first
+        // non-whitespace character following the `=` sign
+        let input = "_a = \"xxxxx\" |> toText |> toText |> toText\n";
+        let tokens = lexer::lex(input);
+        let config = FormatterConfig {
+            max_line_width: 30,
+            indent_width: 4,
+        };
+        let result = format_with_config(&tokens, &config);
+        // `"` starts at column 5, so |> should be at column 5 + 4 = 9
+        let expected = "_a = \"xxxxx\"\n         |> toText\n         |> toText\n         |> toText\n";
+        assert_eq!(result, expected);
+    }
 }
