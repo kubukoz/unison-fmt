@@ -70,6 +70,27 @@ To also format on save, add `editor.formatOnSave`:
 
 The extension runs the formatter as WebAssembly — no external binary needed.
 
+### Extension settings
+
+| Setting                        | Default | Description                                      |
+| ------------------------------ | ------- | ------------------------------------------------ |
+| `unison-format.indentWidth`    | 4       | Number of spaces per indentation level (1–8)     |
+| `unison-format.maxLineWidth`   | 100     | Maximum line width before breaking lines (40–200)|
+| `unison-format.cliPath`        | —       | Path to CLI binary (uses WebAssembly if not set) |
+
+Example `settings.json`:
+
+```json
+{
+  "[unison]": {
+    "editor.defaultFormatter": "kubukoz.unison-format",
+    "editor.formatOnSave": true
+  },
+  "unison-format.indentWidth": 2,
+  "unison-format.maxLineWidth": 80
+}
+```
+
 ## CLI
 
 ### Download
@@ -114,5 +135,23 @@ unison-fmt lex myfile.u
 
 # Dump the CST and print lossless output (for debugging)
 unison-fmt parse myfile.u
+```
+
+### Options
+
+| Option           | Default | Description                              |
+| ---------------- | ------- | ---------------------------------------- |
+| `--indent-width` | 4       | Number of spaces per indentation level   |
+| `--max-width`    | 100     | Maximum line width before breaking lines |
+
+```sh
+# Format with 2-space indentation
+unison-fmt fmt --indent-width 2 myfile.u
+
+# Format with 80-character line width
+unison-fmt fmt --max-width 80 myfile.u
+
+# Combine both options
+unison-fmt fmt --indent-width 2 --max-width 80 myfile.u
 ```
 
