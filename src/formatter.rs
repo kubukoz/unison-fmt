@@ -27,6 +27,7 @@ impl Default for FormatterConfig {
 }
 
 /// A line is a sequence of tokens between newlines.
+#[derive(Clone)]
 struct Line {
     /// Leading indentation (number of spaces in the original)
     original_indent: usize,
@@ -154,11 +155,133 @@ fn compute_indent_levels(lines: &[Line]) -> Vec<usize> {
     levels
 }
 
+/// Try to join multi-line expressions onto a single line when they fit.
+///
+/// Scans for groups of continuation lines (deeper indent than the base line)
+/// and attempts to join them if the result fits within max_line_width.
+/// Uses the pre-computed normalized indent levels to accurately check width.
+fn try_join_lines(
+    lines: Vec<Line>,
+    indent_levels: &[usize],
+    config: &FormatterConfig,
+) -> Vec<Line> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        // Skip empty lines
+        if lines[i].tokens.is_empty() {
+            result.push(lines[i].clone());
+            i += 1;
+            continue;
+        }
+
+        let base_indent = lines[i].original_indent;
+        let normalized_indent = indent_levels[i] * config.indent_width;
+
+        // Find continuation lines (deeper indent)
+        let mut j = i + 1;
+        while j < lines.len()
+            && !lines[j].tokens.is_empty()
+            && lines[j].original_indent > base_indent
+        {
+            j += 1;
+        }
+
+        if j > i + 1 {
+            // Try to join lines[i..j]
+            if let Some(joined) = try_join_group(&lines[i..j], normalized_indent, config) {
+                result.push(joined);
+                i = j;
+                continue;
+            }
+        }
+
+        result.push(lines[i].clone());
+        i += 1;
+    }
+    result
+}
+
+/// Check if a token indicates the start of a block structure (shouldn't be joined).
+fn is_block_introducing_token(tok: &Token) -> bool {
+    match tok.kind {
+        // Specific punctuation tokens
+        TokenKind::Eq | TokenKind::Arrow | TokenKind::Colon | TokenKind::Pipe => true,
+        // Keywords that introduce blocks
+        TokenKind::WordyId => {
+            matches!(
+                tok.text.as_str(),
+                "where" | "with" | "cases" | "match" | "if" | "then" | "else" | "let" | "do"
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Try to join a group of lines into a single line if they fit within max_line_width.
+///
+/// The group must start with a base line and have continuation lines with deeper indentation.
+/// Will not join if the base line ends with block-introducing tokens like `=`, `->`, etc.
+fn try_join_group(lines: &[Line], base_indent: usize, config: &FormatterConfig) -> Option<Line> {
+    // Don't join if the base line ends with a block-introducing token
+    // (like `=`, `->`, `:`, etc.) because that indicates the continuation
+    // is a block body, not a continuation of an expression
+    if let Some(last_tok) = lines[0]
+        .tokens
+        .iter()
+        .rev()
+        .find(|t| t.kind != TokenKind::Whitespace)
+    {
+        if is_block_introducing_token(last_tok) {
+            return None;
+        }
+    }
+
+    // Collect all tokens
+    let mut joined_tokens = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 && !joined_tokens.is_empty() {
+            // Add single space between lines
+            joined_tokens.push(Token {
+                kind: TokenKind::Whitespace,
+                text: " ".to_string(),
+                offset: 0,
+            });
+        }
+        joined_tokens.extend(line.tokens.iter().cloned());
+    }
+
+    // Collapse internal whitespace
+    let joined_tokens = collapse_whitespace(&joined_tokens);
+
+    // Check if it fits within max width
+    let width = base_indent + tokens_display_width(&joined_tokens);
+    if width > config.max_line_width {
+        return None;
+    }
+
+    Some(Line {
+        original_indent: base_indent,
+        tokens: joined_tokens,
+        has_newline: lines.last().unwrap().has_newline,
+        newline_text: lines.last().unwrap().newline_text.clone(),
+    })
+}
+
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
 /// then align consecutive `|>` lines.
 fn normalize_lines(lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> {
-    let mut result = Vec::new();
+    // Compute indent levels first so we can use normalized indents for width checks
     let indent_levels = compute_indent_levels(&lines);
+
+    // Try to join multi-line expressions that fit on one line
+    let lines = try_join_lines(lines, &indent_levels, config);
+
+    // Recompute indent levels after joining (structure may have changed)
+    let indent_levels = compute_indent_levels(&lines);
+
+    let mut result = Vec::new();
 
     for (line, &indent_level) in lines.into_iter().zip(indent_levels.iter()) {
         let new_indent = indent_level * config.indent_width;
@@ -222,18 +345,32 @@ fn normalize_lines(lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> {
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
 ///
-/// The target indent is the preceding non-operator line's indent + one level.
+/// For pipe operators, indents relative to the content after `=`.
+/// For other operators, uses the preceding line's indent + one level.
 fn align_operators(mut lines: Vec<Line>, config: &FormatterConfig) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
         if let Some(op) = line_leading_operator(&lines[i]) {
             // Find the preceding non-empty, non-operator line to base indent on
-            let base_indent = (0..i)
+            let base_line_idx = (0..i)
                 .rev()
-                .find(|&k| !lines[k].tokens.is_empty() && line_leading_operator(&lines[k]).is_none())
-                .map(|k| lines[k].original_indent)
-                .unwrap_or(0);
-            let target_indent = base_indent + config.indent_width;
+                .find(|&k| !lines[k].tokens.is_empty() && line_leading_operator(&lines[k]).is_none());
+
+            let target_indent = if let Some(idx) = base_line_idx {
+                let base_line = &lines[idx];
+                if op == "|>" {
+                    // For pipe operators, indent relative to content after `=`
+                    compute_pipe_continuation_indent(
+                        &base_line.tokens,
+                        base_line.original_indent,
+                        config,
+                    )
+                } else {
+                    base_line.original_indent + config.indent_width
+                }
+            } else {
+                config.indent_width
+            };
 
             lines[i].original_indent = target_indent;
             let mut j = i + 1;
@@ -293,6 +430,38 @@ fn tokens_display_width(tokens: &[Token]) -> usize {
     tokens.iter().map(|t| t.text.len()).sum()
 }
 
+/// Compute the continuation indent for pipe chains.
+/// Returns position of first non-whitespace after `=`, plus indent_width.
+fn compute_pipe_continuation_indent(
+    tokens: &[Token],
+    base_indent: usize,
+    config: &FormatterConfig,
+) -> usize {
+    // Look for `=` token and find position of first non-whitespace after it
+    let mut pos = base_indent;
+    let mut found_eq = false;
+
+    for tok in tokens.iter() {
+        if found_eq {
+            if tok.kind == TokenKind::Whitespace {
+                pos += tok.text.len();
+            } else {
+                // Found first non-whitespace after `=`
+                // Return this position + indent_width
+                return pos + config.indent_width;
+            }
+        } else if tok.kind == TokenKind::Eq {
+            found_eq = true;
+            pos += tok.text.len();
+        } else {
+            pos += tok.text.len();
+        }
+    }
+
+    // No `=` found or no content after it, use standard continuation indent
+    base_indent + config.indent_width
+}
+
 /// Break a long line at sensible points.
 /// Returns a list of sub-lines (each a Vec<Token>).
 fn break_long_line(
@@ -300,15 +469,163 @@ fn break_long_line(
     base_indent: usize,
     config: &FormatterConfig,
 ) -> Vec<Vec<Token>> {
-    // Strategy: try to break at |> operators first, then at other infix operators
+    // Strategy 1: try to break at |> operators first
     let pipe_positions = find_break_positions(tokens);
-
     if !pipe_positions.is_empty() {
         return break_at_positions(tokens, &pipe_positions, base_indent, config);
     }
 
+    // Strategy 2: use fill style - pack as many args as fit per line
+    if has_paren_content(tokens) {
+        let result = break_fill_style(tokens, base_indent, config);
+        if result.len() > 1 {
+            return result;
+        }
+    }
+
     // If no good break points, return as-is
     vec![tokens.to_vec()]
+}
+
+/// Check if the line has parenthesized content that could be broken.
+fn has_paren_content(tokens: &[Token]) -> bool {
+    tokens.iter().any(|t| t.kind == TokenKind::LParen)
+}
+
+/// Break a long line using "fill" style - pack as many arguments as fit on each line.
+/// Finds the first opening paren and breaks the arguments inside it.
+fn break_fill_style(
+    tokens: &[Token],
+    base_indent: usize,
+    config: &FormatterConfig,
+) -> Vec<Vec<Token>> {
+    // Find the first opening paren
+    let paren_pos = tokens.iter().position(|t| t.kind == TokenKind::LParen);
+    let paren_pos = match paren_pos {
+        Some(p) => p,
+        None => return vec![tokens.to_vec()],
+    };
+
+    // Everything before and including the paren is the "prefix"
+    let prefix = &tokens[..=paren_pos];
+
+    // Find the matching closing paren
+    let mut depth = 1u32;
+    let mut close_pos = None;
+    for (i, tok) in tokens[paren_pos + 1..].iter().enumerate() {
+        match tok.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    close_pos = Some(paren_pos + 1 + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let close_pos = match close_pos {
+        Some(p) => p,
+        None => return vec![tokens.to_vec()],
+    };
+
+    // Parse the arguments inside the parens
+    let inner = &tokens[paren_pos + 1..close_pos];
+    let args = parse_args_inside_parens(inner);
+    if args.is_empty() {
+        return vec![tokens.to_vec()];
+    }
+
+    // Suffix is the closing paren and anything after
+    let suffix = &tokens[close_pos..];
+
+    // Build lines using fill style
+    let continuation_indent = base_indent + 2; // Align with content after paren
+    let mut lines: Vec<Vec<Token>> = Vec::new();
+    let mut current_line: Vec<Token> = prefix.to_vec();
+    let mut current_width = base_indent + tokens_display_width(prefix);
+
+    for arg in args.iter() {
+        let arg_width = tokens_display_width(arg);
+        let space_needed = if current_line.last().is_some_and(|t| t.kind == TokenKind::LParen) {
+            0
+        } else {
+            1
+        };
+        let new_width = current_width + space_needed + arg_width;
+
+        if new_width > config.max_line_width && !is_just_prefix(&current_line, prefix) {
+            // This arg doesn't fit, start a new line
+            lines.push(std::mem::take(&mut current_line));
+            current_width = continuation_indent;
+            current_line = arg.clone();
+            current_width += arg_width;
+        } else {
+            // Add to current line
+            if space_needed > 0 {
+                current_line.push(Token {
+                    kind: TokenKind::Whitespace,
+                    text: " ".to_string(),
+                    offset: 0,
+                });
+                current_width += 1;
+            }
+            current_line.extend(arg.iter().cloned());
+            current_width += arg_width;
+        }
+    }
+
+    // Add the suffix (closing paren) to the last line
+    current_line.extend(suffix.iter().cloned());
+    lines.push(current_line);
+
+    if lines.len() <= 1 {
+        return vec![tokens.to_vec()];
+    }
+
+    lines
+}
+
+/// Check if current_line is just the prefix (nothing added yet)
+fn is_just_prefix(current_line: &[Token], prefix: &[Token]) -> bool {
+    current_line.len() == prefix.len()
+}
+
+/// Parse tokens inside parens into individual arguments.
+fn parse_args_inside_parens(tokens: &[Token]) -> Vec<Vec<Token>> {
+    let mut args = Vec::new();
+    let mut current_arg = Vec::new();
+    let mut paren_depth = 0u32;
+
+    for tok in tokens {
+        match tok.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                paren_depth += 1;
+                current_arg.push(tok.clone());
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current_arg.push(tok.clone());
+            }
+            TokenKind::Whitespace if paren_depth == 0 => {
+                // Top-level whitespace separates arguments
+                if !current_arg.is_empty() {
+                    args.push(std::mem::take(&mut current_arg));
+                }
+            }
+            _ => {
+                current_arg.push(tok.clone());
+            }
+        }
+    }
+
+    if !current_arg.is_empty() {
+        args.push(current_arg);
+    }
+
+    args
 }
 
 /// Find positions where we can break the line (before |> operators).
@@ -559,5 +876,49 @@ mod tests {
         let tokens = lexer::lex(input);
         let result = format(&tokens);
         assert_eq!(result, "\n");
+    }
+
+    #[test]
+    fn test_join_multiline_expression() {
+        let input = "writeStatus\n  (ReplayStatus\n    true\n    false)\n";
+        let tokens = lexer::lex(input);
+        let config = FormatterConfig {
+            max_line_width: 120,
+            indent_width: 4,
+        };
+        let result = format_with_config(&tokens, &config);
+        assert_eq!(result, "writeStatus (ReplayStatus true false)\n");
+    }
+
+    #[test]
+    fn test_no_join_when_too_long() {
+        let input = "writeStatus\n  (ReplayStatus\n    true\n    false)\n";
+        let tokens = lexer::lex(input);
+        let config = FormatterConfig {
+            max_line_width: 30, // Too short to fit
+            indent_width: 4,
+        };
+        let result = format_with_config(&tokens, &config);
+        // Should stay multi-line (normalized indentation)
+        assert!(
+            result.lines().count() > 1,
+            "Should remain multi-line when too long to fit: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_join_complex_multiline_expression() {
+        // The motivating example from the plan
+        let input = "writeStatus\n  (ReplayStatus\n    true\n    true\n    (Some since)\n    processed'\n    failed'\n    (Some startedAt)\n    (Some updatedAt)\n    None)\n";
+        let tokens = lexer::lex(input);
+        let config = FormatterConfig {
+            max_line_width: 120,
+            indent_width: 4,
+        };
+        let result = format_with_config(&tokens, &config);
+        assert_eq!(
+            result,
+            "writeStatus (ReplayStatus true true (Some since) processed' failed' (Some startedAt) (Some updatedAt) None)\n"
+        );
     }
 }

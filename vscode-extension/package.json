@@ -2,7 +2,7 @@
   "name": "unison-format",
   "displayName": "Unison Formatter",
   "description": "Format Unison source files using a lossless parser",
-  "version": "0.0.0",
+  "version": "0.0.5",
   "publisher": "kubukoz",
   "license": "Apache-2.0",
   "repository": {
