@@ -95,24 +95,98 @@ fn count_spaces(s: &str) -> usize {
         .sum()
 }
 
-/// Build a mapping from original indent -> normalized indent.
-/// Every distinct indent level maps to a unique normalized level,
-/// preserving ordering. This ensures that if two lines have different
-/// original indentation, they will have different normalized indentation,
-/// which is critical for Unison's indentation-sensitive parsing.
+/// Compute normalized indent levels from original indentation.
+///
+/// Two-pass approach:
+/// 1. Walk lines with a stack to discover parent-child relationships between
+///    indent levels (each indent's parent is the deepest stack entry less than it).
+/// 2. Build a tree of indent levels, sort children by indent value, and assign
+///    normalized levels via DFS. This ensures that distinct indents under the
+///    same parent get distinct normalized levels, ordered by their original value.
 fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
-    let mut indents: Vec<usize> = lines
-        .iter()
-        .filter(|l| !l.tokens.is_empty())
-        .map(|l| l.original_indent)
-        .collect();
-    indents.sort_unstable();
-    indents.dedup();
-    indents
-        .into_iter()
-        .enumerate()
-        .map(|(i, orig)| (orig, i * INDENT_WIDTH))
-        .collect()
+    // Collect distinct indents in order of appearance, tracking parent for each.
+    // parent_of[indent] = the indent of the nearest enclosing scope.
+    let mut parent_of: HashMap<usize, usize> = HashMap::new();
+    let mut seen: HashMap<usize, bool> = HashMap::new();
+    let mut stack: Vec<usize> = vec![0]; // stack of original indents
+
+    seen.insert(0, true);
+
+    for line in lines {
+        if line.tokens.is_empty() {
+            continue;
+        }
+        let orig = line.original_indent;
+
+        // Pop stack entries deeper than or equal to orig (except the base)
+        while stack.len() > 1 && *stack.last().unwrap() >= orig {
+            stack.pop();
+        }
+
+        if !seen.contains_key(&orig) {
+            // Parent is current top of stack
+            parent_of.insert(orig, *stack.last().unwrap());
+            seen.insert(orig, true);
+        }
+
+        // Push orig onto stack if it's deeper than top
+        if orig > *stack.last().unwrap() {
+            stack.push(orig);
+        }
+    }
+
+    // Build children map: parent -> sorted list of child groups.
+    // Children whose indents differ by less than INDENT_WIDTH are grouped
+    // together (they're continuations, not distinct blocks) and share a
+    // normalized level.
+    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (&child, &parent) in &parent_of {
+        children.entry(parent).or_default().push(child);
+    }
+    for v in children.values_mut() {
+        v.sort_unstable();
+    }
+
+    // Group nearby children: consecutive children differing by < INDENT_WIDTH
+    // are merged into the same group (they'll share a normalized level).
+    let mut child_groups: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
+    for (&parent, kids) in &children {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for &kid in kids {
+            if let Some(last_group) = groups.last_mut() {
+                if kid - *last_group.last().unwrap() < INDENT_WIDTH {
+                    last_group.push(kid);
+                    continue;
+                }
+            }
+            groups.push(vec![kid]);
+        }
+        child_groups.insert(parent, groups);
+    }
+
+    // DFS to assign levels. Each group of children shares a level.
+    let mut map: HashMap<usize, usize> = HashMap::new();
+    // (indent_or_group, level)
+    let mut dfs_stack: Vec<(Vec<usize>, usize)> = vec![(vec![0], 0)];
+    while let Some((indents, level)) = dfs_stack.pop() {
+        for &indent in &indents {
+            map.insert(indent, level * INDENT_WIDTH);
+        }
+        // Collect child groups from all indents in this group
+        let mut all_groups: Vec<Vec<usize>> = Vec::new();
+        for &indent in &indents {
+            if let Some(groups) = child_groups.get(&indent) {
+                all_groups.extend(groups.iter().cloned());
+            }
+        }
+        // Sort groups by first element and push in reverse for DFS order
+        all_groups.sort_by_key(|g| g[0]);
+        for (i, group) in all_groups.iter().rev().enumerate() {
+            dfs_stack.push((group.clone(), level + all_groups.len() - i));
+        }
+    }
+
+    map
 }
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
