@@ -6,6 +6,8 @@
 /// 3. Strip trailing whitespace
 /// 4. Break long lines at `|>` and other operators
 
+use std::collections::HashMap;
+
 use crate::lexer::{Token, TokenKind};
 
 const MAX_LINE_WIDTH: usize = 100;
@@ -93,55 +95,38 @@ fn count_spaces(s: &str) -> usize {
         .sum()
 }
 
-/// Compute normalized indent levels from original indentation.
-///
-/// Tracks a stack of seen indentation depths. Each new deeper indentation
-/// increases the level by 1, regardless of how many spaces it jumped.
-/// Returning to a shallower indentation pops back to that level.
-fn compute_indent_levels(lines: &[Line]) -> Vec<usize> {
-    let mut levels = Vec::with_capacity(lines.len());
-    // Stack of (original_indent, level) pairs
-    let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
-
-    for line in lines {
-        // Skip blank lines — they get level 0 (doesn't matter, no tokens)
-        if line.tokens.is_empty() {
-            levels.push(0);
-            continue;
-        }
-
-        let orig = line.original_indent;
-
-        // Pop stack entries that are deeper than current indent
-        while stack.len() > 1 && stack.last().unwrap().0 > orig {
-            stack.pop();
-        }
-
-        let &(top_indent, top_level) = stack.last().unwrap();
-
-        if orig == top_indent {
-            levels.push(top_level);
-        } else if orig > top_indent {
-            let new_level = top_level + 1;
-            stack.push((orig, new_level));
-            levels.push(new_level);
-        } else {
-            // orig < top_indent but not found in stack — use closest
-            levels.push(top_level);
-        }
-    }
-
-    levels
+/// Build a mapping from original indent -> normalized indent.
+/// Every distinct indent level maps to a unique normalized level,
+/// preserving ordering. This ensures that if two lines have different
+/// original indentation, they will have different normalized indentation,
+/// which is critical for Unison's indentation-sensitive parsing.
+fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
+    let mut indents: Vec<usize> = lines
+        .iter()
+        .filter(|l| !l.tokens.is_empty())
+        .map(|l| l.original_indent)
+        .collect();
+    indents.sort_unstable();
+    indents.dedup();
+    indents
+        .into_iter()
+        .enumerate()
+        .map(|(i, orig)| (orig, i * INDENT_WIDTH))
+        .collect()
 }
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
 /// then align consecutive `|>` lines.
 fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
     let mut result = Vec::new();
-    let indent_levels = compute_indent_levels(&lines);
+    let indent_map = compute_indent_map(&lines);
 
-    for (line, &indent_level) in lines.into_iter().zip(indent_levels.iter()) {
-        let new_indent = indent_level * INDENT_WIDTH;
+    for line in lines.into_iter() {
+        let new_indent = if line.tokens.is_empty() {
+            0
+        } else {
+            *indent_map.get(&line.original_indent).unwrap_or(&0)
+        };
 
         // Collapse multiple whitespace tokens within the line to single spaces
         let tokens = collapse_whitespace(&line.tokens);
@@ -194,24 +179,33 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
 ///
+/// Only applies when there are 2+ consecutive lines starting with the same operator
+/// (e.g., lines produced by line breaking). A single operator line keeps its indent
+/// from the indent map to preserve Unison block structure.
+///
 /// The target indent is the preceding non-operator line's indent + one level.
 fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
         if let Some(op) = line_leading_operator(&lines[i]) {
-            // Find the preceding non-empty, non-operator line to base indent on
-            let base_indent = (0..i)
-                .rev()
-                .find(|&k| !lines[k].tokens.is_empty() && line_leading_operator(&lines[k]).is_none())
-                .map(|k| lines[k].original_indent)
-                .unwrap_or(0);
-            let target_indent = base_indent + INDENT_WIDTH;
-
-            lines[i].original_indent = target_indent;
             let mut j = i + 1;
             while j < lines.len() && line_leading_operator(&lines[j]).as_deref() == Some(&*op) {
-                lines[j].original_indent = target_indent;
                 j += 1;
+            }
+            // Only align when there are 2+ consecutive operator lines
+            if j - i >= 2 {
+                let base_indent = (0..i)
+                    .rev()
+                    .find(|&k| {
+                        !lines[k].tokens.is_empty()
+                            && line_leading_operator(&lines[k]).is_none()
+                    })
+                    .map(|k| lines[k].original_indent)
+                    .unwrap_or(0);
+                let target_indent = base_indent + INDENT_WIDTH;
+                for k in i..j {
+                    lines[k].original_indent = target_indent;
+                }
             }
             i = j;
         } else {
@@ -526,5 +520,38 @@ mod tests {
         let tokens = lexer::lex(input);
         let result = format(&tokens);
         assert_eq!(result, "\n");
+    }
+
+    #[test]
+    fn test_distinct_indent_levels_preserved() {
+        // The `do` block body (indent 12) must stay deeper than the |> line (indent 16->8)
+        // Original has 3 distinct levels: 8, 12, 16
+        // They must map to 3 distinct normalized levels preserving order
+        let input = "        name = queryParameter \"name\"\n                |> List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let result = format(&tokens);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let indent0 = lines[0].len() - lines[0].trim_start().len();
+        let indent1 = lines[1].len() - lines[1].trim_start().len();
+        let indent2 = lines[2].len() - lines[2].trim_start().len();
+        // Original: 8 < 12 < 16, so normalized must preserve: indent0 < indent2 < indent1
+        assert!(
+            indent0 < indent2,
+            "name line ({indent0}) must be less indented than raiseBadRequest line ({indent2})"
+        );
+        assert!(
+            indent2 < indent1,
+            "raiseBadRequest line ({indent2}) must be less indented than |> line ({indent1})"
+        );
+    }
+
+    #[test]
+    fn test_multiple_distinct_indent_levels() {
+        // 4 distinct levels: 0, 2, 4, 6 -> should become 0, 4, 8, 12
+        let input = "foo =\n  bar =\n    baz =\n      qux = 1\n";
+        let tokens = lexer::lex(input);
+        let result = format(&tokens);
+        assert_eq!(result, "foo =\n    bar =\n        baz =\n            qux = 1\n");
     }
 }
