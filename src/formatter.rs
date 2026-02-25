@@ -126,13 +126,14 @@ fn count_spaces(s: &str) -> usize {
 fn compute_indent_map(lines: &[Line], indent_width: usize) -> HashMap<usize, usize> {
     // Collect distinct indents in order of appearance, tracking parent for each.
     // parent_of[indent] = the indent of the nearest enclosing scope.
+    // first_seen[indent] = index of the first line where this indent appears.
     let mut parent_of: HashMap<usize, usize> = HashMap::new();
-    let mut seen: HashMap<usize, bool> = HashMap::new();
+    let mut first_seen: HashMap<usize, usize> = HashMap::new();
     let mut stack: Vec<usize> = vec![0]; // stack of original indents
 
-    seen.insert(0, true);
+    first_seen.insert(0, 0);
 
-    for line in lines {
+    for (line_idx, line) in lines.iter().enumerate() {
         if line.tokens.is_empty() {
             continue;
         }
@@ -143,10 +144,10 @@ fn compute_indent_map(lines: &[Line], indent_width: usize) -> HashMap<usize, usi
             stack.pop();
         }
 
-        if !seen.contains_key(&orig) {
+        if !first_seen.contains_key(&orig) {
             // Parent is current top of stack
             parent_of.insert(orig, *stack.last().unwrap());
-            seen.insert(orig, true);
+            first_seen.insert(orig, line_idx);
         }
 
         // Push orig onto stack if it's deeper than top
@@ -155,32 +156,19 @@ fn compute_indent_map(lines: &[Line], indent_width: usize) -> HashMap<usize, usi
         }
     }
 
-    // Build children map: parent -> sorted list of child groups.
-    // Children whose indents differ by less than indent_width are grouped
-    // together (they're continuations, not distinct blocks) and share a
-    // normalized level.
+    // Build children map: parent -> list of children sorted by first appearance.
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     for (&child, &parent) in &parent_of {
         children.entry(parent).or_default().push(child);
     }
     for v in children.values_mut() {
-        v.sort_unstable();
+        v.sort_by_key(|&indent| first_seen.get(&indent).copied().unwrap_or(0));
     }
 
-    // Group nearby children: consecutive children differing by < indent_width
-    // are merged into the same group (they'll share a normalized level).
+    // Each distinct child indent gets its own normalized level.
     let mut child_groups: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
     for (&parent, kids) in &children {
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for &kid in kids {
-            if let Some(last_group) = groups.last_mut() {
-                if kid - *last_group.last().unwrap() < indent_width {
-                    last_group.push(kid);
-                    continue;
-                }
-            }
-            groups.push(vec![kid]);
-        }
+        let groups: Vec<Vec<usize>> = kids.iter().map(|&kid| vec![kid]).collect();
         child_groups.insert(parent, groups);
     }
 
@@ -199,8 +187,8 @@ fn compute_indent_map(lines: &[Line], indent_width: usize) -> HashMap<usize, usi
                 all_groups.extend(groups.iter().cloned());
             }
         }
-        // Sort groups by first element and push in reverse for DFS order
-        all_groups.sort_by_key(|g| g[0]);
+        // Sort by first appearance and push in reverse for DFS order
+        all_groups.sort_by_key(|g| first_seen.get(&g[0]).copied().unwrap_or(0));
         for (i, group) in all_groups.iter().rev().enumerate() {
             dfs_stack.push((group.clone(), level + all_groups.len() - i));
         }
@@ -276,7 +264,8 @@ fn normalize_lines(lines: Vec<Line>, config: &FormatConfig) -> Vec<Line> {
         }
     }
 
-    align_operators(result, config.indent_width)
+    let result = align_operators(result, config.indent_width);
+    fix_block_opener_indent(result, config.indent_width)
 }
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
@@ -315,6 +304,84 @@ fn align_operators(mut lines: Vec<Line>, indent_width: usize) -> Vec<Line> {
         }
     }
     lines
+}
+
+/// Ensure that lines following a block-opening keyword (`do`, `cases`, `->`, etc.)
+/// or a trailing operator (`|>`, `++`) are indented deeper than the opener.
+/// Unison requires this for correct parsing.
+fn fix_block_opener_indent(mut lines: Vec<Line>, indent_width: usize) -> Vec<Line> {
+    for i in 0..lines.len().saturating_sub(1) {
+        if lines[i].tokens.is_empty() {
+            continue;
+        }
+        let is_block_opener = line_ends_with_block_opener(&lines[i]);
+        let is_trailing_op = line_ends_with_breakable_operator(&lines[i]);
+        if !is_block_opener && !is_trailing_op {
+            continue;
+        }
+        let opener_indent = lines[i].original_indent;
+        // Find the next non-empty line
+        if let Some(j) = (i + 1..lines.len()).find(|&k| !lines[k].tokens.is_empty()) {
+            let min_indent = if is_trailing_op {
+                // Continuation must be past the RHS of `=` on this line.
+                // e.g. `name = queryParameter "name" |>` -> continuation
+                // must be at column(queryParameter) + indent_width.
+                rhs_column(&lines[i]) + indent_width
+            } else {
+                opener_indent + indent_width
+            };
+            if lines[j].original_indent < min_indent {
+                lines[j].original_indent = min_indent;
+            }
+        }
+    }
+    lines
+}
+
+/// Find the column of the first token after `=` on a line.
+/// If no `=` is found, falls back to line indent + indent_width.
+fn rhs_column(line: &Line) -> usize {
+    let mut col = line.original_indent;
+    let mut found_eq = false;
+    for tok in &line.tokens {
+        if found_eq {
+            // Skip whitespace after `=`
+            if tok.kind == TokenKind::Whitespace {
+                col += tok.text.len();
+                continue;
+            }
+            // This is the first real token after `=`
+            return col;
+        }
+        if tok.kind == TokenKind::Eq {
+            found_eq = true;
+            col += tok.text.len();
+            continue;
+        }
+        col += tok.text.len();
+    }
+    // No `=` found — fall back to line indent + one level
+    line.original_indent
+}
+
+/// Check if a line ends with a token that opens a block in Unison.
+fn line_ends_with_block_opener(line: &Line) -> bool {
+    line.tokens.last().is_some_and(|t| {
+        matches!(
+            t.kind,
+            TokenKind::KwDo
+                | TokenKind::KwCases
+                | TokenKind::KwWhere
+                | TokenKind::KwWith
+                | TokenKind::KwLet
+                | TokenKind::Arrow
+        )
+    })
+}
+
+/// Check if a line ends with a breakable operator (`|>`, `++`).
+fn line_ends_with_breakable_operator(line: &Line) -> bool {
+    line.tokens.last().is_some_and(|t| is_breakable_operator(t))
 }
 
 /// If the line starts with a symboly operator, return it.
@@ -654,9 +721,9 @@ mod tests {
 
     #[test]
     fn test_distinct_indent_levels_preserved() {
-        // The `do` block body (indent 12) must stay deeper than the |> line (indent 16->8)
-        // Original has 3 distinct levels: 8, 12, 16
-        // They must map to 3 distinct normalized levels preserving order
+        // Line 1 ends with `do`, so line 2 (the do body) must be deeper than line 1.
+        // Original indents: 8, 16, 12 -> normalized must have:
+        //   indent0 (name) < indent1 (|> ... do) < indent2 (raiseBadRequest)
         let input = "        name = queryParameter \"name\"\n                |> List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
@@ -665,14 +732,13 @@ mod tests {
         let indent0 = lines[0].len() - lines[0].trim_start().len();
         let indent1 = lines[1].len() - lines[1].trim_start().len();
         let indent2 = lines[2].len() - lines[2].trim_start().len();
-        // Original: 8 < 12 < 16, so normalized must preserve: indent0 < indent2 < indent1
         assert!(
-            indent0 < indent2,
-            "name line ({indent0}) must be less indented than raiseBadRequest line ({indent2})"
+            indent0 < indent1,
+            "name line ({indent0}) must be less indented than |> line ({indent1})"
         );
         assert!(
-            indent2 < indent1,
-            "raiseBadRequest line ({indent2}) must be less indented than |> line ({indent1})"
+            indent1 < indent2,
+            "|> line ({indent1}) must be less indented than raiseBadRequest line ({indent2})"
         );
     }
 
@@ -718,5 +784,88 @@ mod tests {
         };
         let result_wide = format_with_config(&tokens, &config_wide);
         assert_eq!(result_wide, "x = foo |> bar |> baz |> quux\n");
+    }
+
+    #[test]
+    fn test_do_block_body_deeper_than_do_line() {
+        // The `do` body must be indented deeper than the line ending with `do`
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let indent_do_line = lines[1].len() - lines[1].trim_start().len();
+        let indent_body = lines[2].len() - lines[2].trim_start().len();
+        assert!(
+            indent_body > indent_do_line,
+            "do body ({indent_body}) must be deeper than do line ({indent_do_line})"
+        );
+    }
+
+    #[test]
+    fn test_continuation_deeper_than_parent() {
+        // A multi-line expression continuation must be deeper than the line it continues
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        let lines: Vec<&str> = result.lines().collect();
+        let indent_name = lines[0].len() - lines[0].trim_start().len();
+        let indent_list = lines[1].len() - lines[1].trim_start().len();
+        assert!(
+            indent_list > indent_name,
+            "continuation ({indent_list}) must be deeper than parent ({indent_name})"
+        );
+    }
+
+    #[test]
+    fn test_idempotent_with_indent_2() {
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let pass1 = format_with_config(&tokens, &config);
+        let tokens2 = lexer::lex(&pass1);
+        let pass2 = format_with_config(&tokens2, &config);
+        assert_eq!(pass1, pass2, "Formatting must be idempotent");
+    }
+
+    #[test]
+    fn test_handler_routes_indent_2() {
+        let input = "\nhandlerRoutes =\n    do\n        use Parser /\n        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing name param\" ()\n\n        ok.json (Hello.make\n            |> Hello.name.set (Some name)\n            |> age.set (Some +42)\n            |> encoder)\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            max_line_width: 80,
+        };
+        let result = format_with_config(&tokens, &config);
+        // Verify structure: do body deeper than do line, continuation deeper than parent
+        let content_lines: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        for (i, line) in content_lines.iter().enumerate() {
+            if line.trim_end().ends_with(" do") {
+                // Next content line must be deeper
+                if let Some(next) = content_lines.get(i + 1) {
+                    let do_indent = line.len() - line.trim_start().len();
+                    let body_indent = next.len() - next.trim_start().len();
+                    assert!(
+                        body_indent > do_indent,
+                        "Line after 'do' must be deeper: do@{do_indent} vs body@{body_indent}\ndo line: {line}\nbody line: {next}"
+                    );
+                }
+            }
+        }
+        // Verify idempotent
+        let tokens2 = lexer::lex(&result);
+        let pass2 = format_with_config(&tokens2, &config);
+        assert_eq!(result, pass2, "Formatting must be idempotent");
     }
 }
