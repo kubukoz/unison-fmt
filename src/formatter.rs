@@ -1,17 +1,32 @@
 /// Formatter for Unison source code.
 ///
 /// Operates on the flat token stream and applies formatting rules:
-/// 1. Normalize indentation to 2-space levels
+/// 1. Normalize indentation to configurable indent width
 /// 2. Collapse multiple spaces to single space (within lines, not indentation)
 /// 3. Strip trailing whitespace
-/// 4. Break long lines at `|>` and other operators
+/// 4. Break long lines at `|>`, `++` and other operators
 
 use std::collections::HashMap;
 
 use crate::lexer::{Token, TokenKind};
 
-const MAX_LINE_WIDTH: usize = 100;
-const INDENT_WIDTH: usize = 4;
+/// Configuration for the formatter.
+#[derive(Debug, Clone)]
+pub struct FormatConfig {
+    /// Width of a single indentation level in spaces.
+    pub indent_width: usize,
+    /// Maximum line width before breaking.
+    pub max_line_width: usize,
+}
+
+impl Default for FormatConfig {
+    fn default() -> Self {
+        FormatConfig {
+            indent_width: 4,
+            max_line_width: 120,
+        }
+    }
+}
 
 /// A line is a sequence of tokens between newlines.
 struct Line {
@@ -25,10 +40,15 @@ struct Line {
     newline_text: String,
 }
 
-/// Format a token stream into a formatted string.
+/// Format a token stream into a formatted string using default configuration.
 pub fn format(tokens: &[Token]) -> String {
+    format_with_config(tokens, &FormatConfig::default())
+}
+
+/// Format a token stream into a formatted string using the given configuration.
+pub fn format_with_config(tokens: &[Token], config: &FormatConfig) -> String {
     let lines = split_into_lines(tokens);
-    let formatted_lines = normalize_lines(lines);
+    let formatted_lines = normalize_lines(lines, config);
     render(formatted_lines)
 }
 
@@ -103,16 +123,17 @@ fn count_spaces(s: &str) -> usize {
 /// 2. Build a tree of indent levels, sort children by indent value, and assign
 ///    normalized levels via DFS. This ensures that distinct indents under the
 ///    same parent get distinct normalized levels, ordered by their original value.
-fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
+fn compute_indent_map(lines: &[Line], indent_width: usize) -> HashMap<usize, usize> {
     // Collect distinct indents in order of appearance, tracking parent for each.
     // parent_of[indent] = the indent of the nearest enclosing scope.
+    // first_seen[indent] = index of the first line where this indent appears.
     let mut parent_of: HashMap<usize, usize> = HashMap::new();
-    let mut seen: HashMap<usize, bool> = HashMap::new();
+    let mut first_seen: HashMap<usize, usize> = HashMap::new();
     let mut stack: Vec<usize> = vec![0]; // stack of original indents
 
-    seen.insert(0, true);
+    first_seen.insert(0, 0);
 
-    for line in lines {
+    for (line_idx, line) in lines.iter().enumerate() {
         if line.tokens.is_empty() {
             continue;
         }
@@ -123,10 +144,10 @@ fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
             stack.pop();
         }
 
-        if !seen.contains_key(&orig) {
+        if !first_seen.contains_key(&orig) {
             // Parent is current top of stack
             parent_of.insert(orig, *stack.last().unwrap());
-            seen.insert(orig, true);
+            first_seen.insert(orig, line_idx);
         }
 
         // Push orig onto stack if it's deeper than top
@@ -135,32 +156,19 @@ fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
         }
     }
 
-    // Build children map: parent -> sorted list of child groups.
-    // Children whose indents differ by less than INDENT_WIDTH are grouped
-    // together (they're continuations, not distinct blocks) and share a
-    // normalized level.
+    // Build children map: parent -> list of children sorted by first appearance.
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     for (&child, &parent) in &parent_of {
         children.entry(parent).or_default().push(child);
     }
     for v in children.values_mut() {
-        v.sort_unstable();
+        v.sort_by_key(|&indent| first_seen.get(&indent).copied().unwrap_or(0));
     }
 
-    // Group nearby children: consecutive children differing by < INDENT_WIDTH
-    // are merged into the same group (they'll share a normalized level).
+    // Each distinct child indent gets its own normalized level.
     let mut child_groups: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
     for (&parent, kids) in &children {
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        for &kid in kids {
-            if let Some(last_group) = groups.last_mut() {
-                if kid - *last_group.last().unwrap() < INDENT_WIDTH {
-                    last_group.push(kid);
-                    continue;
-                }
-            }
-            groups.push(vec![kid]);
-        }
+        let groups: Vec<Vec<usize>> = kids.iter().map(|&kid| vec![kid]).collect();
         child_groups.insert(parent, groups);
     }
 
@@ -170,7 +178,7 @@ fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
     let mut dfs_stack: Vec<(Vec<usize>, usize)> = vec![(vec![0], 0)];
     while let Some((indents, level)) = dfs_stack.pop() {
         for &indent in &indents {
-            map.insert(indent, level * INDENT_WIDTH);
+            map.insert(indent, level * indent_width);
         }
         // Collect child groups from all indents in this group
         let mut all_groups: Vec<Vec<usize>> = Vec::new();
@@ -179,8 +187,8 @@ fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
                 all_groups.extend(groups.iter().cloned());
             }
         }
-        // Sort groups by first element and push in reverse for DFS order
-        all_groups.sort_by_key(|g| g[0]);
+        // Sort by first appearance and push in reverse for DFS order
+        all_groups.sort_by_key(|g| first_seen.get(&g[0]).copied().unwrap_or(0));
         for (i, group) in all_groups.iter().rev().enumerate() {
             dfs_stack.push((group.clone(), level + all_groups.len() - i));
         }
@@ -191,9 +199,9 @@ fn compute_indent_map(lines: &[Line]) -> HashMap<usize, usize> {
 
 /// Normalize lines: fix indentation, collapse internal whitespace, break long lines,
 /// then align consecutive `|>` lines.
-fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
+fn normalize_lines(lines: Vec<Line>, config: &FormatConfig) -> Vec<Line> {
     let mut result = Vec::new();
-    let indent_map = compute_indent_map(&lines);
+    let indent_map = compute_indent_map(&lines, config.indent_width);
 
     for line in lines.into_iter() {
         let new_indent = if line.tokens.is_empty() {
@@ -208,18 +216,26 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
         // Check if the line is too long and needs breaking
         let line_len = new_indent + tokens_display_width(&tokens);
 
-        if line_len > MAX_LINE_WIDTH {
+        if line_len > config.max_line_width {
             // Try to break the line, then recursively break any sub-lines still too long
-            let broken = break_long_line(&tokens, new_indent);
+            let broken = break_long_line(&tokens, new_indent, config);
             let mut sub_lines: Vec<(usize, Vec<Token>)> = Vec::new();
             for (i, sub_tokens) in broken.iter().enumerate() {
-                let indent = if i == 0 { new_indent } else { new_indent + INDENT_WIDTH };
+                let indent = if i == 0 {
+                    new_indent
+                } else {
+                    new_indent + config.indent_width
+                };
                 let sub_len = indent + tokens_display_width(sub_tokens);
-                if sub_len > MAX_LINE_WIDTH && broken.len() > 1 {
+                if sub_len > config.max_line_width && broken.len() > 1 {
                     // Recursively break this sub-line
-                    let sub_broken = break_long_line(sub_tokens, indent);
+                    let sub_broken = break_long_line(sub_tokens, indent, config);
                     for (j, sub_sub) in sub_broken.iter().enumerate() {
-                        let sub_indent = if j == 0 { indent } else { indent + INDENT_WIDTH };
+                        let sub_indent = if j == 0 {
+                            indent
+                        } else {
+                            indent + config.indent_width
+                        };
                         sub_lines.push((sub_indent, sub_sub.clone()));
                     }
                 } else {
@@ -248,7 +264,8 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
         }
     }
 
-    align_operators(result)
+    let result = align_operators(result, config.indent_width);
+    fix_block_opener_indent(result, config.indent_width)
 }
 
 /// Align consecutive lines that start with the same operator to the same indentation level.
@@ -258,7 +275,7 @@ fn normalize_lines(lines: Vec<Line>) -> Vec<Line> {
 /// from the indent map to preserve Unison block structure.
 ///
 /// The target indent is the preceding non-operator line's indent + one level.
-fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
+fn align_operators(mut lines: Vec<Line>, indent_width: usize) -> Vec<Line> {
     let mut i = 0;
     while i < lines.len() {
         if let Some(op) = line_leading_operator(&lines[i]) {
@@ -276,7 +293,7 @@ fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
                     })
                     .map(|k| lines[k].original_indent)
                     .unwrap_or(0);
-                let target_indent = base_indent + INDENT_WIDTH;
+                let target_indent = base_indent + indent_width;
                 for k in i..j {
                     lines[k].original_indent = target_indent;
                 }
@@ -287,6 +304,84 @@ fn align_operators(mut lines: Vec<Line>) -> Vec<Line> {
         }
     }
     lines
+}
+
+/// Ensure that lines following a block-opening keyword (`do`, `cases`, `->`, etc.)
+/// or a trailing operator (`|>`, `++`) are indented deeper than the opener.
+/// Unison requires this for correct parsing.
+fn fix_block_opener_indent(mut lines: Vec<Line>, indent_width: usize) -> Vec<Line> {
+    for i in 0..lines.len().saturating_sub(1) {
+        if lines[i].tokens.is_empty() {
+            continue;
+        }
+        let is_block_opener = line_ends_with_block_opener(&lines[i]);
+        let is_trailing_op = line_ends_with_breakable_operator(&lines[i]);
+        if !is_block_opener && !is_trailing_op {
+            continue;
+        }
+        let opener_indent = lines[i].original_indent;
+        // Find the next non-empty line
+        if let Some(j) = (i + 1..lines.len()).find(|&k| !lines[k].tokens.is_empty()) {
+            let min_indent = if is_trailing_op {
+                // Continuation must be past the RHS of `=` on this line.
+                // e.g. `name = queryParameter "name" |>` -> continuation
+                // must be at column(queryParameter) + indent_width.
+                rhs_column(&lines[i]) + indent_width
+            } else {
+                opener_indent + indent_width
+            };
+            if lines[j].original_indent < min_indent {
+                lines[j].original_indent = min_indent;
+            }
+        }
+    }
+    lines
+}
+
+/// Find the column of the first token after `=` on a line.
+/// If no `=` is found, falls back to line indent + indent_width.
+fn rhs_column(line: &Line) -> usize {
+    let mut col = line.original_indent;
+    let mut found_eq = false;
+    for tok in &line.tokens {
+        if found_eq {
+            // Skip whitespace after `=`
+            if tok.kind == TokenKind::Whitespace {
+                col += tok.text.len();
+                continue;
+            }
+            // This is the first real token after `=`
+            return col;
+        }
+        if tok.kind == TokenKind::Eq {
+            found_eq = true;
+            col += tok.text.len();
+            continue;
+        }
+        col += tok.text.len();
+    }
+    // No `=` found — fall back to line indent + one level
+    line.original_indent
+}
+
+/// Check if a line ends with a token that opens a block in Unison.
+fn line_ends_with_block_opener(line: &Line) -> bool {
+    line.tokens.last().is_some_and(|t| {
+        matches!(
+            t.kind,
+            TokenKind::KwDo
+                | TokenKind::KwCases
+                | TokenKind::KwWhere
+                | TokenKind::KwWith
+                | TokenKind::KwLet
+                | TokenKind::Arrow
+        )
+    })
+}
+
+/// Check if a line ends with a breakable operator (`|>`, `++`).
+fn line_ends_with_breakable_operator(line: &Line) -> bool {
+    line.tokens.last().is_some_and(|t| is_breakable_operator(t))
 }
 
 /// If the line starts with a symboly operator, return it.
@@ -335,31 +430,40 @@ fn tokens_display_width(tokens: &[Token]) -> usize {
 
 /// Break a long line at sensible points.
 /// Returns a list of sub-lines (each a Vec<Token>).
-fn break_long_line(tokens: &[Token], base_indent: usize) -> Vec<Vec<Token>> {
-    // Strategy: try to break at |> operators first, then at other infix operators
-    let pipe_positions = find_break_positions(tokens);
+fn break_long_line(
+    tokens: &[Token],
+    base_indent: usize,
+    config: &FormatConfig,
+) -> Vec<Vec<Token>> {
+    // Strategy: try to break at |> and ++ operators
+    let positions = find_break_positions(tokens);
 
-    if !pipe_positions.is_empty() {
-        return break_at_positions(tokens, &pipe_positions, base_indent);
+    if !positions.is_empty() {
+        return break_at_positions(tokens, &positions, base_indent, config);
     }
 
     // If no good break points, return as-is
     vec![tokens.to_vec()]
 }
 
-/// Find positions where we can break the line (before |> operators).
+/// Find positions where we can break the line (before |> and ++ operators).
 /// First tries top-level only; if none found, allows breaking inside parens.
 fn find_break_positions(tokens: &[Token]) -> Vec<usize> {
-    // First pass: only top-level |>
-    let positions = find_pipe_positions(tokens, false);
+    // First pass: only top-level operators
+    let positions = find_operator_positions(tokens, false);
     if !positions.is_empty() {
         return positions;
     }
-    // Second pass: allow |> at any nesting depth
-    find_pipe_positions(tokens, true)
+    // Second pass: allow operators at any nesting depth
+    find_operator_positions(tokens, true)
 }
 
-fn find_pipe_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
+/// Whether this token is a breakable operator (|> or ++).
+fn is_breakable_operator(tok: &Token) -> bool {
+    tok.kind == TokenKind::SymbolyId && (tok.text == "|>" || tok.text == "++")
+}
+
+fn find_operator_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut paren_depth = 0u32;
 
@@ -376,8 +480,8 @@ fn find_pipe_positions(tokens: &[Token], allow_nested: bool) -> Vec<usize> {
             continue;
         }
 
-        // Break before |>
-        if tok.kind == TokenKind::SymbolyId && tok.text == "|>" && i > 0 {
+        // Break before |> and ++
+        if is_breakable_operator(tok) && i > 0 {
             positions.push(i);
         }
     }
@@ -391,10 +495,11 @@ fn break_at_positions(
     tokens: &[Token],
     positions: &[usize],
     base_indent: usize,
+    config: &FormatConfig,
 ) -> Vec<Vec<Token>> {
     let mut result = Vec::new();
     let mut start = 0;
-    let continuation_indent = base_indent + INDENT_WIDTH;
+    let continuation_indent = base_indent + config.indent_width;
 
     for &pos in positions {
         // Take tokens from start to pos (exclusive)
@@ -414,7 +519,7 @@ fn break_at_positions(
             let width = indent + tokens_display_width(&chunk);
 
             // If first chunk is short enough, emit it
-            if result.is_empty() || width <= MAX_LINE_WIDTH {
+            if result.is_empty() || width <= config.max_line_width {
                 result.push(chunk);
             } else {
                 // Merge with previous chunk if possible
@@ -440,9 +545,6 @@ fn break_at_positions(
         while chunk.first().is_some_and(|t| t.kind == TokenKind::Whitespace) {
             chunk.remove(0);
         }
-        // But we want the |> to start the line, so put it back
-        // Actually, start already points at the |>, so chunk starts with |>
-        // Just remove any whitespace after |> and re-add a single space
         if !chunk.is_empty() {
             result.push(chunk);
         }
@@ -545,13 +647,34 @@ mod tests {
 
     #[test]
     fn test_break_long_pipe_line() {
-        let input = "x = foo |> bar |> baz |> quux |> something |> another |> more |> evenMore |> reallyLongFunction |> anotherOne\n";
+        let input = "x = foo |> bar |> baz |> quux |> something |> another |> more |> evenMore |> reallyLongFunction |> anotherOne |> yetAnother\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
         // Should be broken across multiple lines
         assert!(
             result.lines().count() > 1,
             "Long line should be broken:\n{result}"
+        );
+        // Each continuation should be indented
+        for (i, line) in result.lines().enumerate() {
+            if i > 0 {
+                assert!(
+                    line.starts_with("    "),
+                    "Continuation line should be indented: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_break_long_concat_line() {
+        let input = "x = foo ++ bar ++ baz ++ quux ++ something ++ another ++ more ++ evenMore ++ reallyLongFunction ++ anotherOne ++ yetAnother\n";
+        let tokens = lexer::lex(input);
+        let result = format(&tokens);
+        // Should be broken across multiple lines
+        assert!(
+            result.lines().count() > 1,
+            "Long ++ line should be broken:\n{result}"
         );
         // Each continuation should be indented
         for (i, line) in result.lines().enumerate() {
@@ -598,9 +721,9 @@ mod tests {
 
     #[test]
     fn test_distinct_indent_levels_preserved() {
-        // The `do` block body (indent 12) must stay deeper than the |> line (indent 16->8)
-        // Original has 3 distinct levels: 8, 12, 16
-        // They must map to 3 distinct normalized levels preserving order
+        // Line 1 ends with `do`, so line 2 (the do body) must be deeper than line 1.
+        // Original indents: 8, 16, 12 -> normalized must have:
+        //   indent0 (name) < indent1 (|> ... do) < indent2 (raiseBadRequest)
         let input = "        name = queryParameter \"name\"\n                |> List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
         let tokens = lexer::lex(input);
         let result = format(&tokens);
@@ -609,14 +732,13 @@ mod tests {
         let indent0 = lines[0].len() - lines[0].trim_start().len();
         let indent1 = lines[1].len() - lines[1].trim_start().len();
         let indent2 = lines[2].len() - lines[2].trim_start().len();
-        // Original: 8 < 12 < 16, so normalized must preserve: indent0 < indent2 < indent1
         assert!(
-            indent0 < indent2,
-            "name line ({indent0}) must be less indented than raiseBadRequest line ({indent2})"
+            indent0 < indent1,
+            "name line ({indent0}) must be less indented than |> line ({indent1})"
         );
         assert!(
-            indent2 < indent1,
-            "raiseBadRequest line ({indent2}) must be less indented than |> line ({indent1})"
+            indent1 < indent2,
+            "|> line ({indent1}) must be less indented than raiseBadRequest line ({indent2})"
         );
     }
 
@@ -627,5 +749,123 @@ mod tests {
         let tokens = lexer::lex(input);
         let result = format(&tokens);
         assert_eq!(result, "foo =\n    bar =\n        baz =\n            qux = 1\n");
+    }
+
+    #[test]
+    fn test_custom_indent_width() {
+        let input = "foo =\n  bar = 1\n  baz = 2\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        assert_eq!(result, "foo =\n  bar = 1\n  baz = 2\n");
+    }
+
+    #[test]
+    fn test_custom_max_line_width() {
+        let input = "x = foo |> bar |> baz |> quux\n";
+        let tokens = lexer::lex(input);
+        // With a narrow max width, should break
+        let config = FormatConfig {
+            max_line_width: 20,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        assert!(
+            result.lines().count() > 1,
+            "Should break at narrow width:\n{result}"
+        );
+        // With a wide max width, should not break
+        let config_wide = FormatConfig {
+            max_line_width: 200,
+            ..FormatConfig::default()
+        };
+        let result_wide = format_with_config(&tokens, &config_wide);
+        assert_eq!(result_wide, "x = foo |> bar |> baz |> quux\n");
+    }
+
+    #[test]
+    fn test_do_block_body_deeper_than_do_line() {
+        // The `do` body must be indented deeper than the line ending with `do`
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let indent_do_line = lines[1].len() - lines[1].trim_start().len();
+        let indent_body = lines[2].len() - lines[2].trim_start().len();
+        assert!(
+            indent_body > indent_do_line,
+            "do body ({indent_body}) must be deeper than do line ({indent_do_line})"
+        );
+    }
+
+    #[test]
+    fn test_continuation_deeper_than_parent() {
+        // A multi-line expression continuation must be deeper than the line it continues
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let result = format_with_config(&tokens, &config);
+        let lines: Vec<&str> = result.lines().collect();
+        let indent_name = lines[0].len() - lines[0].trim_start().len();
+        let indent_list = lines[1].len() - lines[1].trim_start().len();
+        assert!(
+            indent_list > indent_name,
+            "continuation ({indent_list}) must be deeper than parent ({indent_name})"
+        );
+    }
+
+    #[test]
+    fn test_idempotent_with_indent_2() {
+        let input = "        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing\" ()\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            ..FormatConfig::default()
+        };
+        let pass1 = format_with_config(&tokens, &config);
+        let tokens2 = lexer::lex(&pass1);
+        let pass2 = format_with_config(&tokens2, &config);
+        assert_eq!(pass1, pass2, "Formatting must be idempotent");
+    }
+
+    #[test]
+    fn test_handler_routes_indent_2() {
+        let input = "\nhandlerRoutes =\n    do\n        use Parser /\n        name = queryParameter \"name\" |>\n                List.head |> Optional.getOrElse' do\n            raiseBadRequest \"missing name param\" ()\n\n        ok.json (Hello.make\n            |> Hello.name.set (Some name)\n            |> age.set (Some +42)\n            |> encoder)\n";
+        let tokens = lexer::lex(input);
+        let config = FormatConfig {
+            indent_width: 2,
+            max_line_width: 80,
+        };
+        let result = format_with_config(&tokens, &config);
+        // Verify structure: do body deeper than do line, continuation deeper than parent
+        let content_lines: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        for (i, line) in content_lines.iter().enumerate() {
+            if line.trim_end().ends_with(" do") {
+                // Next content line must be deeper
+                if let Some(next) = content_lines.get(i + 1) {
+                    let do_indent = line.len() - line.trim_start().len();
+                    let body_indent = next.len() - next.trim_start().len();
+                    assert!(
+                        body_indent > do_indent,
+                        "Line after 'do' must be deeper: do@{do_indent} vs body@{body_indent}\ndo line: {line}\nbody line: {next}"
+                    );
+                }
+            }
+        }
+        // Verify idempotent
+        let tokens2 = lexer::lex(&result);
+        let pass2 = format_with_config(&tokens2, &config);
+        assert_eq!(result, pass2, "Formatting must be idempotent");
     }
 }
